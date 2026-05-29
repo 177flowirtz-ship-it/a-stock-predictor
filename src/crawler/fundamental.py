@@ -1,6 +1,6 @@
-import json
 import time
 import requests
+import yfinance as yf
 from config.settings import (
     EASTMONEY_FUNDAMENTAL_URL,
     HEADERS,
@@ -10,9 +10,24 @@ from config.settings import (
 )
 
 
-def fetch_fundamental_data(code):
-    result = {"pe": None, "pb": None, "roe": None, "revenue_growth": None}
+def _yfinance_ticker(code):
+    return f"{code}.SS" if code.startswith("6") else f"{code}.SZ"
 
+
+def fetch_fundamental_data(code):
+    result = _fetch_from_eastmoney(code)
+    if result and any(result.values()):
+        return result
+
+    result = _fetch_from_yfinance(code)
+    if result and any(result.values()):
+        return result
+
+    return {"pe": None, "pb": None, "roe": None, "revenue_growth": None}
+
+
+def _fetch_from_eastmoney(code):
+    result = {"pe": None, "pb": None, "roe": None, "revenue_growth": None}
     for attempt in range(MAX_RETRIES):
         try:
             params = {
@@ -41,14 +56,34 @@ def fetch_fundamental_data(code):
                     result["pb"] = latest.get("PB")
                     result["roe"] = latest.get("ROE_WEIGHTAVG")
                     result["revenue_growth"] = latest.get("TOTALOPERATEREVE_YOY")
-
             time.sleep(REQUEST_INTERVAL)
             break
-
-        except Exception as e:
+        except Exception:
             if attempt < MAX_RETRIES - 1:
                 time.sleep(REQUEST_INTERVAL * (2**attempt))
-            else:
-                pass
+    return result
 
+
+def _fetch_from_yfinance(code):
+    result = {"pe": None, "pb": None, "roe": None, "revenue_growth": None}
+    try:
+        ticker_str = _yfinance_ticker(code)
+        ticker = yf.Ticker(ticker_str)
+        info = ticker.info
+        if info:
+            pe = info.get("trailingPE") or info.get("forwardPE")
+            pb = info.get("priceToBook")
+            roe = info.get("returnOnEquity")
+            if roe is not None:
+                roe = roe * 100
+            rev_growth = info.get("revenueGrowth")
+            if rev_growth is not None:
+                rev_growth = rev_growth * 100
+
+            result["pe"] = pe
+            result["pb"] = pb
+            result["roe"] = roe
+            result["revenue_growth"] = rev_growth
+    except Exception:
+        pass
     return result

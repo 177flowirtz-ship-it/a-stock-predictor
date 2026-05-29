@@ -4,26 +4,22 @@ import time
 from datetime import datetime, timedelta
 import requests
 import pandas as pd
+import yfinance as yf
 from config.settings import (
-    HEADERS,
-    REQUEST_TIMEOUT,
-    REQUEST_INTERVAL,
-    MAX_RETRIES,
-    KLINE_DAYS,
-    DATA_DIR,
+    HEADERS, REQUEST_TIMEOUT, MAX_RETRIES, KLINE_DAYS, DATA_DIR,
 )
 
 
 def _market_prefix(code):
-    if code.startswith("6"):
-        return "sh"
-    return "sz"
+    return "sh" if code.startswith("6") else "sz"
 
 
 def _eastmoney_secid(code):
-    if code.startswith("6"):
-        return f"1.{code}"
-    return f"0.{code}"
+    return f"1.{code}" if code.startswith("6") else f"0.{code}"
+
+
+def _yfinance_ticker(code):
+    return f"{code}.SS" if code.startswith("6") else f"{code}.SZ"
 
 
 def fetch_kline(code, market, days=KLINE_DAYS):
@@ -35,6 +31,8 @@ def fetch_kline(code, market, days=KLINE_DAYS):
     df = _fetch_from_tencent(code, days)
     if df is None:
         df = _fetch_from_eastmoney(code, days)
+    if df is None:
+        df = _fetch_from_yfinance(code, days)
 
     if df is not None and not df.empty:
         _save_cache(cache_path, df)
@@ -45,7 +43,7 @@ def _fetch_from_tencent(code, days):
     try:
         prefix = _market_prefix(code)
         url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-        params = {"param": f"{prefix}{code},day,,,{days+10},qfq", "_var": "kline_day"}
+        params = {"param": f"{prefix}{code},day,,,{days + 10},qfq", "_var": "kline_day"}
         resp = requests.get(url, params=params, headers=HEADERS, timeout=REQUEST_TIMEOUT)
         text = resp.text.replace("kline_day=", "")
         data = json.loads(text)
@@ -55,21 +53,11 @@ def _fetch_from_tencent(code, days):
             return None
         rows = []
         for line in klines[-days:]:
-            rows.append(
-                {
-                    "date": line[0],
-                    "open": float(line[1]),
-                    "close": float(line[2]),
-                    "high": float(line[3]),
-                    "low": float(line[4]),
-                    "volume": float(line[5]),
-                    "amount": 0,
-                    "amplitude": 0,
-                    "pct_chg": 0,
-                    "change": 0,
-                    "turnover": 0,
-                }
-            )
+            rows.append({
+                "date": line[0], "open": float(line[1]), "close": float(line[2]),
+                "high": float(line[3]), "low": float(line[4]), "volume": float(line[5]),
+                "amount": 0, "amplitude": 0, "pct_chg": 0, "change": 0, "turnover": 0,
+            })
         df = pd.DataFrame(rows)
         if not df.empty:
             df["date"] = pd.to_datetime(df["date"])
@@ -114,6 +102,39 @@ def _fetch_from_eastmoney(code, days):
         if not df.empty:
             df["date"] = pd.to_datetime(df["date"])
             df = df.sort_values("date").tail(days)
+        return df
+    except Exception:
+        return None
+
+
+def _fetch_from_yfinance(code, days):
+    try:
+        ticker_str = _yfinance_ticker(code)
+        ticker = yf.Ticker(ticker_str)
+        end = datetime.now()
+        start = end - timedelta(days=days + 30)
+        df = ticker.history(start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"))
+        if df.empty:
+            return None
+
+        df = df.reset_index()
+        df = df.rename(columns={
+            "Date": "date", "Open": "open", "High": "high",
+            "Low": "low", "Close": "close", "Volume": "volume",
+        })
+        df["amount"] = 0
+        df["amplitude"] = 0
+        df["pct_chg"] = 0
+        df["change"] = 0
+        df["turnover"] = 0
+
+        for col in ["date", "open", "close", "high", "low", "volume", "amount", "amplitude", "pct_chg", "change", "turnover"]:
+            if col not in df.columns:
+                df[col] = 0
+
+        df = df[["date", "open", "close", "high", "low", "volume", "amount", "amplitude", "pct_chg", "change", "turnover"]]
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date").tail(days)
         return df
     except Exception:
         return None
