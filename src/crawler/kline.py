@@ -22,6 +22,74 @@ def _yfinance_ticker(code):
     return f"{code}.SS" if code.startswith("6") else f"{code}.SZ"
 
 
+def fetch_kline_batch(stock_list):
+    tencent_results = {}
+    for stock in stock_list:
+        code = stock["code"]
+        df = _fetch_from_tencent(code, KLINE_DAYS)
+        if df is not None and not df.empty:
+            tencent_results[code] = df
+    if len(tencent_results) > len(stock_list) * 0.5:
+        return tencent_results
+
+    ticker_map = {_yfinance_ticker(s["code"]): s["code"] for s in stock_list}
+    tickers = list(ticker_map.keys())
+    try:
+        end = datetime.now()
+        start = end - timedelta(days=KLINE_DAYS + 30)
+        df_all = yf.download(tickers, start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"), progress=False)
+        if df_all.empty:
+            return {}
+        results = {}
+        for yf_ticker, code in ticker_map.items():
+            try:
+                if "Close" in df_all.columns:
+                    sub = df_all.xs(yf_ticker, level=1, axis=1) if len(tickers) > 1 else df_all
+                else:
+                    sub = df_all
+                if sub.empty:
+                    continue
+                sub = sub.reset_index()
+                sub = sub.rename(columns={
+                    "Date": "date", "Open": "open", "High": "high",
+                    "Low": "low", "Close": "close", "Volume": "volume",
+                })
+                for col in ["open", "close", "high", "low", "volume"]:
+                    if col not in sub.columns:
+                        continue
+                sub["amount"] = 0
+                sub["amplitude"] = 0
+                sub["pct_chg"] = 0
+                sub["change"] = 0
+                sub["turnover"] = 0
+                cols = ["date", "open", "close", "high", "low", "volume", "amount", "amplitude", "pct_chg", "change", "turnover"]
+                sub = sub[[c for c in cols if c in sub.columns]]
+                sub["date"] = pd.to_datetime(sub["date"])
+                sub = sub.sort_values("date").tail(KLINE_DAYS)
+                if len(sub) >= 20:
+                    results[code] = sub
+            except Exception:
+                pass
+        return results
+    except Exception:
+        for stock in stock_list:
+            code = stock["code"]
+            df = _fetch_from_yfinance_single(code, KLINE_DAYS)
+            if df is not None and not df.empty and len(df) >= 20:
+                pass
+        return _fetch_batch_sequential(stock_list)
+
+
+def _fetch_batch_sequential(stock_list):
+    results = {}
+    for stock in stock_list:
+        code = stock["code"]
+        df = fetch_kline(code, stock["market"])
+        if df is not None and not df.empty and len(df) >= 20:
+            results[code] = df
+    return results
+
+
 def fetch_kline(code, market, days=KLINE_DAYS):
     cache_path = _cache_path(code)
     cached = _load_cache(cache_path)
@@ -32,7 +100,7 @@ def fetch_kline(code, market, days=KLINE_DAYS):
     if df is None:
         df = _fetch_from_eastmoney(code, days)
     if df is None:
-        df = _fetch_from_yfinance(code, days)
+        df = _fetch_from_yfinance_single(code, days)
 
     if df is not None and not df.empty:
         _save_cache(cache_path, df)
@@ -107,7 +175,7 @@ def _fetch_from_eastmoney(code, days):
         return None
 
 
-def _fetch_from_yfinance(code, days):
+def _fetch_from_yfinance_single(code, days):
     try:
         ticker_str = _yfinance_ticker(code)
         ticker = yf.Ticker(ticker_str)
@@ -116,7 +184,6 @@ def _fetch_from_yfinance(code, days):
         df = ticker.history(start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"))
         if df.empty:
             return None
-
         df = df.reset_index()
         df = df.rename(columns={
             "Date": "date", "Open": "open", "High": "high",
@@ -127,11 +194,9 @@ def _fetch_from_yfinance(code, days):
         df["pct_chg"] = 0
         df["change"] = 0
         df["turnover"] = 0
-
         for col in ["date", "open", "close", "high", "low", "volume", "amount", "amplitude", "pct_chg", "change", "turnover"]:
             if col not in df.columns:
                 df[col] = 0
-
         df = df[["date", "open", "close", "high", "low", "volume", "amount", "amplitude", "pct_chg", "change", "turnover"]]
         df["date"] = pd.to_datetime(df["date"])
         df = df.sort_values("date").tail(days)
