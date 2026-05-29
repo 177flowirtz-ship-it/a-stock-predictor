@@ -17,3 +17,5 @@ output/*.md
 .idea/
 .vscode/
 .tools/
+
+.gh-config/
